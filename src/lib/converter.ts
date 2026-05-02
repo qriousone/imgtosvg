@@ -3,26 +3,50 @@ import potrace from 'potrace'
 import quantize from 'quantize'
 
 export interface ConversionOptions {
-  colors?: number     // palette size: 4–64
-  turdSize?: number   // min area to keep (noise removal)
-  smoothing?: number  // gaussian blur sigma applied to each mask before tracing (0 = off)
-  maxSize?: number    // max dimension before resize
+  colors?: number
+  turdSize?: number
+  smoothing?: number
+  maxSize?: number
 }
 
 type RGB = [number, number, number]
+
+// ── Perceptual color math ─────────────────────────────────────────────────────
+
+// Precompute sRGB → linear lookup (avoids Math.pow per pixel)
+const SRGB_LINEAR = new Float32Array(256)
+for (let i = 0; i < 256; i++) {
+  const v = i / 255
+  SRGB_LINEAR[i] = v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+}
+
+function rgbToLab(r: number, g: number, b: number): [number, number, number] {
+  const lr = SRGB_LINEAR[r], lg = SRGB_LINEAR[g], lb = SRGB_LINEAR[b]
+  // Linear RGB → XYZ (D65), normalize by white point
+  const x = (lr * 0.4124564 + lg * 0.3575761 + lb * 0.1804375) / 0.95047
+  const y =  lr * 0.2126729 + lg * 0.7151522 + lb * 0.0721750
+  const z = (lr * 0.0193339 + lg * 0.1191920 + lb * 0.9503041) / 1.08883
+  const f = (t: number) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116
+  const fx = f(x), fy = f(y), fz = f(z)
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)]
+}
+
+function labDist(
+  L1: number, a1: number, b1: number,
+  L2: number, a2: number, b2: number
+): number {
+  return (L1-L2)**2 + (a1-a2)**2 + (b1-b2)**2  // sqrt omitted — only used for comparison
+}
+
+function luminance(r: number, g: number, b: number): number {
+  return 0.299 * r + 0.587 * g + 0.114 * b
+}
 
 function rgbToHex(r: number, g: number, b: number): string {
   return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')
 }
 
-function luminance(r: number, g: number, b: number): number {
-  // Perceptual luminance — determines layer draw order
-  return 0.299 * r + 0.587 * g + 0.114 * b
-}
-
-function colorKey(c: RGB): string {
-  return `${c[0]},${c[1]},${c[2]}`
-}
+// ── Potrace wrapper ───────────────────────────────────────────────────────────
 
 function traceBuffer(pngBuffer: Buffer, color: string, turdSize: number): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -30,17 +54,17 @@ function traceBuffer(pngBuffer: Buffer, color: string, turdSize: number): Promis
       color,
       threshold: 128,
       turdSize,
-      alphaMax: 1.3333,    // max corner rounding
+      alphaMax: 1.3333,  // max corner rounding
       optCurve: true,
-      optTolerance: 0.4,   // merge nearby anchors more aggressively
+      optTolerance: 0.6, // aggressively merge nearby anchors into clean bezier spans
     }, (err: Error | null, svg: string) => {
       if (err) return reject(err)
-      // Extract everything inside the outer <svg> so we keep the transform wrapper if present
-      const inner = svg.match(/<svg[^>]*>([\s\S]*?)<\/svg>/)?.[1]?.trim() ?? ''
-      resolve(inner)
+      resolve(svg.match(/<svg[^>]*>([\s\S]*?)<\/svg>/)?.[1]?.trim() ?? '')
     })
   })
 }
+
+// ── Main conversion ───────────────────────────────────────────────────────────
 
 export async function convertImageToSvg(
   imageBuffer: Buffer,
@@ -49,21 +73,20 @@ export async function convertImageToSvg(
   const { colors = 16, turdSize = 2, smoothing = 1, maxSize = 900 } = opts
 
   // ── 1. Preprocess ────────────────────────────────────────────────────────────
-  // Resize so potrace stays fast; flatten alpha onto white so colors are clean.
+  // Median(3) kills 1-px antialiased fringe pixels before quantization so
+  // they don't bleed into the dark/outline color bucket.
   const preprocessed = await sharp(imageBuffer)
     .resize(maxSize, maxSize, { fit: 'inside', withoutEnlargement: true })
     .flatten({ background: { r: 255, g: 255, b: 255 } })
     .toColorspace('srgb')
+    .median(3)
     .png()
     .toBuffer()
 
   const { width, height } = await sharp(preprocessed).metadata()
   if (!width || !height) throw new Error('Could not read image dimensions')
 
-  // ── 2. Read raw RGB pixels ───────────────────────────────────────────────────
-  const { data: rawData } = await sharp(preprocessed)
-    .removeAlpha()
-    .raw()
+  const { data: rawData } = await sharp(preprocessed).removeAlpha().raw()
     .toBuffer({ resolveWithObject: true })
 
   const totalPixels = width * height
@@ -72,65 +95,78 @@ export async function convertImageToSvg(
     pixelArray[i] = [rawData[i * 3], rawData[i * 3 + 1], rawData[i * 3 + 2]]
   }
 
-  // ── 3. Quantize colors (median-cut) ──────────────────────────────────────────
+  // ── 2. Generate palette via median-cut ───────────────────────────────────────
   const colorCount = Math.max(2, Math.min(colors, 100))
   const colorMap = quantize(pixelArray, colorCount)
-  if (!colorMap) throw new Error('Quantization failed — image may be too simple')
-
+  if (!colorMap) throw new Error('Quantization failed — image may be a single color')
   const palette: RGB[] = colorMap.palette()
 
-  // Map each pixel to its palette index
-  const keyToIdx = new Map<string, number>(palette.map((c, i) => [colorKey(c), i]))
+  // ── 3. Assign pixels using CIE Lab distance (perceptually uniform) ───────────
+  // RGB Euclidean treats yellow/green as far apart but they look similar to the
+  // eye. Lab space matches perception, so edge pixels land in the right bucket.
+  const paletteLab = palette.map(([r, g, b]) => rgbToLab(r, g, b))
   const pixelPaletteIdx = new Uint8Array(totalPixels)
+
   for (let i = 0; i < totalPixels; i++) {
-    const mapped = colorMap.map(pixelArray[i]) as RGB
-    pixelPaletteIdx[i] = keyToIdx.get(colorKey(mapped)) ?? 0
+    const [r, g, b] = pixelArray[i]
+    const [L, A, B] = rgbToLab(r, g, b)
+    let minDist = Infinity, nearest = 0
+    for (let j = 0; j < paletteLab.length; j++) {
+      const d = labDist(L, A, B, paletteLab[j][0], paletteLab[j][1], paletteLab[j][2])
+      if (d < minDist) { minDist = d; nearest = j }
+    }
+    pixelPaletteIdx[i] = nearest
   }
 
-  // ── 4. Sort palette darkest → lightest ───────────────────────────────────────
-  // Darker layers go underneath; lighter ones overlay them, matching natural depth.
+  // ── 4. Sort layers: lightest → mid → dark outlines last ──────────────────────
+  // Luminance < 50 = outline/shadow colors → always drawn on top.
+  // Everything else: lightest first so fills establish the base, detail overlays.
   const sortedPalette = palette
     .map((c, idx) => ({ c, idx, lum: luminance(c[0], c[1], c[2]) }))
-    .sort((a, b) => a.lum - b.lum)
+    .sort((a, b) => {
+      const aDark = a.lum < 50
+      const bDark = b.lum < 50
+      if (aDark !== bDark) return aDark ? 1 : -1   // dark always last
+      return b.lum - a.lum                          // lightest first otherwise
+    })
 
-  // ── 5. Per-color mask → trace ─────────────────────────────────────────────────
+  // ── 5. Per-color: mask → expand → smooth → trace ─────────────────────────────
   const layers: string[] = []
 
   for (const { c, idx } of sortedPalette) {
-    // Build a black-on-white binary mask for this palette entry.
-    // Potrace traces the dark (black) regions on a white background.
     const maskRaw = Buffer.alloc(totalPixels * 3)
     for (let i = 0; i < totalPixels; i++) {
-      const v = pixelPaletteIdx[i] === idx ? 0 : 255  // 0 = this color → black
-      maskRaw[i * 3] = v
-      maskRaw[i * 3 + 1] = v
-      maskRaw[i * 3 + 2] = v
+      const v = pixelPaletteIdx[i] === idx ? 0 : 255  // black = this color
+      maskRaw[i * 3] = v; maskRaw[i * 3 + 1] = v; maskRaw[i * 3 + 2] = v
     }
 
-    // Blur softens jagged quantization boundaries so Potrace traces smooth curves.
-    // Then threshold back to binary so the mask stays crisp at the traced edge.
-    const maskBuilder = sharp(maskRaw, { raw: { width, height, channels: 3 } })
-    const maskPng = await (smoothing > 0
-      ? maskBuilder.blur(smoothing).threshold(128)
-      : maskBuilder
-    ).png().toBuffer()
+    // Two-stage pipeline — kept separate so they're independently tunable:
+    // Stage A: fixed 1px expansion — closes gaps between adjacent regions
+    //          blur(1) creates a gradient halo; threshold(185) pulls ~1-2px of
+    //          background into the color region (simulates morphological dilation)
+    // Stage B: user smoothing — additional blur softens the traced outline shape
+    let pipeline = sharp(maskRaw, { raw: { width, height, channels: 3 } })
+      .blur(1.0)
+      .threshold(185)
+
+    if (smoothing > 0) {
+      pipeline = (pipeline as ReturnType<typeof sharp>)
+        .blur(smoothing)
+        .threshold(128) as ReturnType<typeof sharp>
+    }
+
+    const maskPng = await (pipeline as ReturnType<typeof sharp>).png().toBuffer()
 
     try {
-      const hex = rgbToHex(c[0], c[1], c[2])
-      const inner = await traceBuffer(maskPng, hex, turdSize)
+      const inner = await traceBuffer(maskPng, rgbToHex(c[0], c[1], c[2]), turdSize)
       if (inner) layers.push(inner)
-    } catch {
-      // Skip layers that fail silently
-    }
+    } catch { /* skip failed layers */ }
   }
 
   if (layers.length === 0) throw new Error('No vector paths could be traced from this image')
 
-  // ── 6. Assemble final SVG ────────────────────────────────────────────────────
-  // Wrap each potrace output in a <g> so their individual transforms are preserved.
+  // ── 6. Assemble SVG ──────────────────────────────────────────────────────────
   const body = layers.map(l => `  <g>${l}</g>`).join('\n')
-
-  // No fixed width/height — let CSS control sizing via the viewBox aspect ratio.
   return [
     `<svg xmlns="http://www.w3.org/2000/svg"`,
     `     viewBox="0 0 ${width} ${height}"`,
