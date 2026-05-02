@@ -140,18 +140,20 @@ export async function convertImageToSvg(
       maskRaw[i * 3] = v; maskRaw[i * 3 + 1] = v; maskRaw[i * 3 + 2] = v
     }
 
-    // Two-stage pipeline — kept separate so they're independently tunable:
-    // Stage A: fixed 1px expansion — closes gaps between adjacent regions
-    //          blur(1) creates a gradient halo; threshold(185) pulls ~1-2px of
-    //          background into the color region (simulates morphological dilation)
-    // Stage B: user smoothing — additional blur softens the traced outline shape
+    // Stage A (fixed): expand each color region by ~1px to close gaps between
+    //   adjacent layers. blur(1)+threshold(185) pulls the gradient halo inward.
+    //   Never changes — independent of the smoothing slider.
+    // Stage B (optional): gentle softening of the mask edge shape.
+    //   Capped at blur sigma 1.5 so fine detail (eyes, tiny bubbles) is preserved
+    //   even at smoothing=5.
     let pipeline = sharp(maskRaw, { raw: { width, height, channels: 3 } })
       .blur(1.0)
       .threshold(185)
 
     if (smoothing > 0) {
+      const softSigma = Math.min(Math.max(smoothing * 0.25, 0.3), 1.5)
       pipeline = (pipeline as ReturnType<typeof sharp>)
-        .blur(smoothing)
+        .blur(softSigma)
         .threshold(128) as ReturnType<typeof sharp>
     }
 
