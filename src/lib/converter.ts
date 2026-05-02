@@ -3,9 +3,10 @@ import potrace from 'potrace'
 import quantize from 'quantize'
 
 export interface ConversionOptions {
-  colors?: number    // palette size: 4–32
-  turdSize?: number  // min area to keep (noise removal)
-  maxSize?: number   // max dimension before resize
+  colors?: number     // palette size: 4–64
+  turdSize?: number   // min area to keep (noise removal)
+  smoothing?: number  // gaussian blur sigma applied to each mask before tracing (0 = off)
+  maxSize?: number    // max dimension before resize
 }
 
 type RGB = [number, number, number]
@@ -25,7 +26,14 @@ function colorKey(c: RGB): string {
 
 function traceBuffer(pngBuffer: Buffer, color: string, turdSize: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    potrace.trace(pngBuffer, { color, threshold: 128, turdSize }, (err: Error | null, svg: string) => {
+    potrace.trace(pngBuffer, {
+      color,
+      threshold: 128,
+      turdSize,
+      alphaMax: 1.3333,    // max corner rounding
+      optCurve: true,
+      optTolerance: 0.4,   // merge nearby anchors more aggressively
+    }, (err: Error | null, svg: string) => {
       if (err) return reject(err)
       // Extract everything inside the outer <svg> so we keep the transform wrapper if present
       const inner = svg.match(/<svg[^>]*>([\s\S]*?)<\/svg>/)?.[1]?.trim() ?? ''
@@ -38,7 +46,7 @@ export async function convertImageToSvg(
   imageBuffer: Buffer,
   opts: ConversionOptions = {}
 ): Promise<string> {
-  const { colors = 16, turdSize = 2, maxSize = 900 } = opts
+  const { colors = 16, turdSize = 2, smoothing = 1, maxSize = 900 } = opts
 
   // ── 1. Preprocess ────────────────────────────────────────────────────────────
   // Resize so potrace stays fast; flatten alpha onto white so colors are clean.
@@ -65,7 +73,7 @@ export async function convertImageToSvg(
   }
 
   // ── 3. Quantize colors (median-cut) ──────────────────────────────────────────
-  const colorCount = Math.max(2, Math.min(colors, 32))
+  const colorCount = Math.max(2, Math.min(colors, 100))
   const colorMap = quantize(pixelArray, colorCount)
   if (!colorMap) throw new Error('Quantization failed — image may be too simple')
 
@@ -99,9 +107,13 @@ export async function convertImageToSvg(
       maskRaw[i * 3 + 2] = v
     }
 
-    const maskPng = await sharp(maskRaw, { raw: { width, height, channels: 3 } })
-      .png()
-      .toBuffer()
+    // Blur softens jagged quantization boundaries so Potrace traces smooth curves.
+    // Then threshold back to binary so the mask stays crisp at the traced edge.
+    const maskBuilder = sharp(maskRaw, { raw: { width, height, channels: 3 } })
+    const maskPng = await (smoothing > 0
+      ? maskBuilder.blur(smoothing).threshold(128)
+      : maskBuilder
+    ).png().toBuffer()
 
     try {
       const hex = rgbToHex(c[0], c[1], c[2])

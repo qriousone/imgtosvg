@@ -4,8 +4,6 @@ import { useState, useCallback, useRef } from 'react'
 
 type Stage = 'idle' | 'ready' | 'converting' | 'done' | 'error'
 
-const COLOR_OPTIONS = [4, 8, 12, 16, 24, 32]
-
 function UploadIcon() {
   return (
     <svg className="w-12 h-12 text-purple-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -16,7 +14,7 @@ function UploadIcon() {
 
 function Spinner() {
   return (
-    <svg className="animate-spin h-6 w-6 text-purple-400" viewBox="0 0 24 24" fill="none">
+    <svg className="animate-spin h-5 w-5 text-purple-400" viewBox="0 0 24 24" fill="none">
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
     </svg>
@@ -32,7 +30,7 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false)
   const [colors, setColors] = useState(16)
   const [turdSize, setTurdSize] = useState(2)
-  const [activeTab, setActiveTab] = useState<'original' | 'svg'>('original')
+  const [smoothing, setSmoothing] = useState(1)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const acceptFile = useCallback((f: File) => {
@@ -40,7 +38,6 @@ export default function Home() {
     setStage('ready')
     setSvgResult(null)
     setErrorMsg(null)
-    setActiveTab('original')
     const url = URL.createObjectURL(f)
     setPreviewUrl(prev => {
       if (prev) URL.revokeObjectURL(prev)
@@ -71,6 +68,7 @@ export default function Home() {
       form.append('image', file)
       form.append('colors', String(colors))
       form.append('turdSize', String(turdSize))
+      form.append('smoothing', String(smoothing))
 
       const res = await fetch('/api/convert', { method: 'POST', body: form })
 
@@ -82,7 +80,6 @@ export default function Home() {
       const svg = await res.text()
       setSvgResult(svg)
       setStage('done')
-      setActiveTab('svg')
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Something went wrong')
       setStage('error')
@@ -110,6 +107,7 @@ export default function Home() {
   }, [])
 
   const isConverting = stage === 'converting'
+  const hasImage = stage !== 'idle'
 
   return (
     <main className="min-h-screen flex flex-col items-center px-4 py-12">
@@ -123,203 +121,181 @@ export default function Home() {
         </p>
       </div>
 
-      <div className="w-full max-w-5xl flex flex-col gap-6">
-        {/* Top row: upload + settings */}
-        <div className="flex flex-col lg:flex-row gap-6">
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+        className="hidden"
+        onChange={onFileChange}
+      />
 
-          {/* Upload zone */}
+      <div className="w-full max-w-6xl flex flex-col gap-4">
+
+        {/* ── IDLE: big upload zone ─────────────────────────────────────────── */}
+        {!hasImage && (
           <div
-            className={`flex-1 rounded-2xl border-2 border-dashed transition-all duration-200 flex flex-col items-center justify-center p-10 cursor-pointer
-              ${isDragging ? 'border-purple-400 bg-purple-900/20' : 'border-[#2a2a38] bg-[#1a1a24] hover:border-purple-600'}
-              ${stage !== 'idle' && stage !== 'ready' ? 'opacity-50 pointer-events-none' : ''}`}
+            className={`rounded-2xl border-2 border-dashed transition-all duration-200 flex flex-col items-center justify-center p-20 cursor-pointer
+              ${isDragging ? 'border-purple-400 bg-purple-900/20' : 'border-[#2a2a38] bg-[#1a1a24] hover:border-purple-600'}`}
             onDragOver={e => { e.preventDefault(); setIsDragging(true) }}
             onDragLeave={() => setIsDragging(false)}
             onDrop={onDrop}
             onClick={() => inputRef.current?.click()}
           >
-            <input
-              ref={inputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
-              className="hidden"
-              onChange={onFileChange}
-            />
             <UploadIcon />
-            {file ? (
-              <div className="text-center">
-                <p className="font-medium text-white">{file.name}</p>
-                <p className="text-xs text-gray-400 mt-1">{(file.size / 1024).toFixed(0)} KB · click to change</p>
-              </div>
-            ) : (
-              <div className="text-center">
-                <p className="font-medium text-gray-200">Drop image here</p>
-                <p className="text-xs text-gray-500 mt-1">PNG, JPG, WEBP, GIF, BMP · up to 20 MB</p>
-              </div>
-            )}
-          </div>
-
-          {/* Settings panel */}
-          <div className="lg:w-64 rounded-2xl bg-[#1a1a24] border border-[#2a2a38] p-6 flex flex-col gap-5">
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Settings</p>
-
-            <div>
-              <label className="text-sm text-gray-300 mb-2 block">
-                Colors
-                <span className="ml-2 text-purple-400 font-mono">{colors}</span>
-              </label>
-              <div className="flex flex-wrap gap-2">
-                {COLOR_OPTIONS.map(n => (
-                  <button
-                    key={n}
-                    onClick={() => setColors(n)}
-                    className={`px-3 py-1 rounded-lg text-sm font-mono transition-all
-                      ${colors === n
-                        ? 'bg-purple-600 text-white'
-                        : 'bg-[#12121a] text-gray-400 hover:bg-[#22223a]'}`}
-                  >
-                    {n}
-                  </button>
-                ))}
-              </div>
-              <p className="text-xs text-gray-500 mt-2">
-                More colors = more detail, slower conversion.
-              </p>
-            </div>
-
-            <div>
-              <label className="text-sm text-gray-300 mb-2 block">
-                Noise removal
-                <span className="ml-2 text-purple-400 font-mono">{turdSize}</span>
-              </label>
-              <input
-                type="range"
-                min={0} max={10} step={1}
-                value={turdSize}
-                onChange={e => setTurdSize(Number(e.target.value))}
-                className="w-full accent-purple-500"
-              />
-              <div className="flex justify-between text-xs text-gray-500 mt-1">
-                <span>none</span><span>aggressive</span>
-              </div>
-            </div>
-
-            <div className="mt-auto flex flex-col gap-2">
-              <button
-                onClick={convert}
-                disabled={!file || isConverting}
-                className={`w-full py-3 rounded-xl font-semibold text-sm transition-all
-                  ${file && !isConverting
-                    ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-lg shadow-purple-900/40 active:scale-95'
-                    : 'bg-[#22223a] text-gray-500 cursor-not-allowed'}`}
-              >
-                {isConverting ? (
-                  <span className="flex items-center justify-center gap-2"><Spinner /> Converting…</span>
-                ) : 'Convert to SVG'}
-              </button>
-
-              {(stage === 'done' || stage === 'error' || stage === 'ready') && (
-                <button
-                  onClick={reset}
-                  className="w-full py-2 rounded-xl text-sm text-gray-400 hover:text-white hover:bg-[#22223a] transition-all"
-                >
-                  Reset
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Error banner */}
-        {stage === 'error' && errorMsg && (
-          <div className="rounded-xl bg-red-950/60 border border-red-800 px-5 py-4 text-red-300 text-sm">
-            {errorMsg}
+            <p className="font-medium text-gray-200 text-lg">Drop an image here</p>
+            <p className="text-xs text-gray-500 mt-2">PNG, JPG, WEBP, GIF, BMP · up to 20 MB</p>
           </div>
         )}
 
-        {/* Preview area */}
-        {(previewUrl || svgResult) && (
-          <div className="rounded-2xl bg-[#1a1a24] border border-[#2a2a38] overflow-hidden">
-            {/* Tabs */}
-            <div className="flex border-b border-[#2a2a38]">
+        {/* ── WITH IMAGE: two preview panels + toolbar ─────────────────────── */}
+        {hasImage && (
+          <>
+            {/* Toolbar */}
+            <div className="flex items-center gap-3 flex-wrap">
+              {/* File chip */}
               <button
-                className={`px-6 py-3 text-sm font-medium transition-all border-b-2 -mb-px
-                  ${activeTab === 'original'
-                    ? 'border-purple-500 text-purple-300'
-                    : 'border-transparent text-gray-500 hover:text-gray-300'}`}
-                onClick={() => setActiveTab('original')}
+                onClick={() => inputRef.current?.click()}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#1a1a24] border border-[#2a2a38] text-xs text-gray-400 hover:text-white hover:border-purple-600 transition-all"
               >
-                Original
-              </button>
-              <button
-                className={`px-6 py-3 text-sm font-medium transition-all border-b-2 -mb-px
-                  ${activeTab === 'svg'
-                    ? 'border-purple-500 text-purple-300'
-                    : 'border-transparent text-gray-500 hover:text-gray-300'}`}
-                onClick={() => setActiveTab('svg')}
-                disabled={!svgResult}
-              >
-                SVG {svgResult ? '✓' : ''}
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+                </svg>
+                {file?.name ?? 'image'}
               </button>
 
+              {/* Colors */}
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#1a1a24] border border-[#2a2a38]">
+                <span className="text-xs text-gray-400">Colors</span>
+                <span className="text-xs text-purple-400 font-mono w-7 text-right">{colors}</span>
+                <input
+                  type="range" min={4} max={100} step={1} value={colors}
+                  onChange={e => setColors(Number(e.target.value))}
+                  className="w-24 accent-purple-500"
+                />
+              </div>
+
+              {/* Smoothing */}
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#1a1a24] border border-[#2a2a38]">
+                <span className="text-xs text-gray-400">Smooth</span>
+                <span className="text-xs text-purple-400 font-mono w-5 text-right">{smoothing}</span>
+                <input
+                  type="range" min={0} max={5} step={0.5} value={smoothing}
+                  onChange={e => setSmoothing(Number(e.target.value))}
+                  className="w-20 accent-purple-500"
+                />
+              </div>
+
+              {/* Noise removal */}
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#1a1a24] border border-[#2a2a38]">
+                <span className="text-xs text-gray-400">Noise</span>
+                <span className="text-xs text-purple-400 font-mono w-3 text-right">{turdSize}</span>
+                <input
+                  type="range" min={0} max={10} step={1} value={turdSize}
+                  onChange={e => setTurdSize(Number(e.target.value))}
+                  className="w-20 accent-purple-500"
+                />
+              </div>
+
+              {/* Spacer */}
+              <div className="flex-1" />
+
+              {/* Actions */}
               {svgResult && (
                 <button
                   onClick={downloadSvg}
-                  className="ml-auto mr-4 my-2 px-4 py-1.5 text-xs rounded-lg bg-purple-700 hover:bg-purple-600 text-white font-medium transition-all active:scale-95"
+                  className="px-4 py-1.5 text-xs rounded-lg bg-[#1a1a24] border border-[#2a2a38] text-gray-300 hover:text-white hover:border-purple-600 transition-all font-medium"
                 >
                   Download SVG
                 </button>
               )}
+              <button
+                onClick={convert}
+                disabled={isConverting}
+                className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-semibold transition-all
+                  ${!isConverting
+                    ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-lg shadow-purple-900/40 active:scale-95'
+                    : 'bg-[#22223a] text-gray-500 cursor-not-allowed'}`}
+              >
+                {isConverting && <Spinner />}
+                {isConverting ? 'Converting…' : 'Convert'}
+              </button>
+              <button
+                onClick={reset}
+                className="px-3 py-1.5 text-xs rounded-lg text-gray-500 hover:text-white hover:bg-[#22223a] transition-all"
+              >
+                Reset
+              </button>
             </div>
 
-            {/* Content */}
-            <div className="checker min-h-72 flex items-center justify-center p-6 overflow-hidden" style={{ maxHeight: '560px' }}>
-              {activeTab === 'original' && previewUrl && (
-                <img
-                  src={previewUrl}
-                  alt="Original"
-                  className="max-w-full max-h-[520px] object-contain rounded shadow-2xl"
-                />
-              )}
+            {/* Error */}
+            {stage === 'error' && errorMsg && (
+              <div className="rounded-xl bg-red-950/60 border border-red-800 px-5 py-3 text-red-300 text-sm">
+                {errorMsg}
+              </div>
+            )}
 
-              {activeTab === 'svg' && (
-                isConverting ? (
-                  <div className="flex flex-col items-center gap-3 text-gray-400">
-                    <Spinner />
-                    <p className="text-sm">Tracing layers…</p>
-                  </div>
-                ) : svgResult ? (
-                  <div
-                    className="w-full"
-                    style={{ maxHeight: '520px', overflow: 'hidden', lineHeight: 0 }}
-                    dangerouslySetInnerHTML={{ __html: svgResult }}
-                  />
-                ) : null
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Side-by-side when both available */}
-        {svgResult && previewUrl && (
-          <div className="rounded-2xl bg-[#1a1a24] border border-[#2a2a38] p-5">
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-4">Side by side</p>
+            {/* Two panels */}
             <div className="grid grid-cols-2 gap-4">
-              <div className="checker rounded-xl overflow-hidden flex items-center justify-center p-4 min-h-48">
-                <img src={previewUrl} alt="Original" className="max-w-full max-h-64 object-contain" />
-              </div>
-              <div className="checker rounded-xl overflow-hidden p-4 min-h-48">
+              {/* Original */}
+              <div className="rounded-2xl bg-[#1a1a24] border border-[#2a2a38] overflow-hidden flex flex-col">
+                <div className="px-4 py-2.5 border-b border-[#2a2a38] flex items-center justify-between">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Original</span>
+                  <button
+                    onClick={() => inputRef.current?.click()}
+                    className="text-xs text-gray-600 hover:text-purple-400 transition-colors"
+                  >
+                    change
+                  </button>
+                </div>
                 <div
-                  className="w-full"
-                  dangerouslySetInnerHTML={{ __html: svgResult }}
-                  style={{ lineHeight: 0 }}
-                />
+                  className="checker flex-1 flex items-center justify-center p-4"
+                  style={{ minHeight: '400px' }}
+                  onDragOver={e => { e.preventDefault(); setIsDragging(true) }}
+                  onDragLeave={() => setIsDragging(false)}
+                  onDrop={onDrop}
+                >
+                  {previewUrl && (
+                    <img
+                      src={previewUrl}
+                      alt="Original"
+                      className="max-w-full max-h-[480px] object-contain"
+                    />
+                  )}
+                </div>
+              </div>
+
+              {/* SVG */}
+              <div className="rounded-2xl bg-[#1a1a24] border border-[#2a2a38] overflow-hidden flex flex-col">
+                <div className="px-4 py-2.5 border-b border-[#2a2a38] flex items-center justify-between">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-widest">SVG</span>
+                  {svgResult && (
+                    <span className="text-xs text-gray-600">
+                      {(new Blob([svgResult]).size / 1024).toFixed(0)} KB
+                    </span>
+                  )}
+                </div>
+                <div
+                  className="checker flex-1 flex items-center justify-center p-4"
+                  style={{ minHeight: '400px' }}
+                >
+                  {isConverting ? (
+                    <div className="flex flex-col items-center gap-3 text-gray-500">
+                      <Spinner />
+                      <p className="text-xs">Tracing layers…</p>
+                    </div>
+                  ) : svgResult ? (
+                    <div
+                      className="w-full max-h-[480px] overflow-hidden"
+                      style={{ lineHeight: 0 }}
+                      dangerouslySetInnerHTML={{ __html: svgResult }}
+                    />
+                  ) : (
+                    <p className="text-xs text-gray-600">Hit Convert to trace</p>
+                  )}
+                </div>
               </div>
             </div>
-            <div className="flex justify-center gap-8 mt-3 text-xs text-gray-500">
-              <span>Original</span>
-              <span>SVG</span>
-            </div>
-          </div>
+          </>
         )}
       </div>
 
