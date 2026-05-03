@@ -1,6 +1,7 @@
 import sharp from 'sharp'
 import potrace from 'potrace'
 import quantize from 'quantize'
+import { fitPrimitivesInSvg } from './fit-primitives'
 
 export interface ConversionOptions {
   colors?: number
@@ -83,13 +84,13 @@ export async function convertImageToSvg(
   const { colors = 16, turdSize = 2, smoothing = 1, maxSize = 900 } = opts
 
   // ── 1. Preprocess ────────────────────────────────────────────────────────────
-  // Median(3) kills 1-px antialiased fringe pixels before quantization so
-  // they don't bleed into the dark/outline color bucket.
+  // Median(5) kills antialiased fringe pixels (up to ~2px wide) before
+  // quantization so they don't bleed into dark/outline color buckets.
   const preprocessed = await sharp(imageBuffer)
     .resize(maxSize, maxSize, { fit: 'inside', withoutEnlargement: true })
     .flatten({ background: { r: 255, g: 255, b: 255 } })
     .toColorspace('srgb')
-    .median(3)
+    .median(5)
     .png()
     .toBuffer()
 
@@ -128,19 +129,26 @@ export async function convertImageToSvg(
     pixelPaletteIdx[i] = nearest
   }
 
-  // ── 4. Sort layers: lightest → mid → dark outlines last ──────────────────────
-  // Luminance < 50 = outline/shadow colors → always drawn on top.
-  // Everything else: lightest first so fills establish the base, detail overlays.
+  // ── 4. Count pixels per palette entry — used to detect fringe layers ────────
+  // Fringe colors (blended edge pixels) are dark AND cover very few pixels.
+  // Real fills and intentional outlines cover enough area to distinguish them.
+  const paletteCounts = new Int32Array(palette.length)
+  for (let i = 0; i < totalPixels; i++) paletteCounts[pixelPaletteIdx[i]]++
+
+  // ── 5. Sort layers: largest area first (painter's algorithm), dark last ────────
+  // Sort non-dark layers by pixel count descending: biggest shapes paint first,
+  // smaller shapes (highlights, bubbles) paint on top naturally — no cutouts needed.
+  // Dark outlines (lum < 50) always go last regardless of area.
   const sortedPalette = palette
     .map((c, idx) => ({ c, idx, lum: luminance(c[0], c[1], c[2]) }))
     .sort((a, b) => {
       const aDark = a.lum < 50
       const bDark = b.lum < 50
-      if (aDark !== bDark) return aDark ? 1 : -1   // dark always last
-      return b.lum - a.lum                          // lightest first otherwise
+      if (aDark !== bDark) return aDark ? 1 : -1              // dark always last
+      return paletteCounts[b.idx] - paletteCounts[a.idx]      // largest area first
     })
 
-  // ── 5. Per-color: mask → expand → smooth → trace ─────────────────────────────
+  // ── 6. Per-color: mask → expand/erode → smooth → trace ──────────────────────
   const layers: string[] = []
   const layerColors: string[] = []
   const layerSvgs: string[] = []
@@ -148,25 +156,45 @@ export async function convertImageToSvg(
   const svgWrap = (inner: string, hex: string) =>
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" style="display:block;width:100%;height:auto"><g>${inner.replace(/fill="[^"]*"/, `fill="${hex}"`)}</g></svg>`
 
-  for (const { c, idx } of sortedPalette) {
+  // Painter's algorithm: each non-dark layer should be a solid filled shape.
+  // Pre-compute each palette entry's draw position so the mask loop can check
+  // whether a pixel belongs to a "later" layer.
+  const palettePositions = new Uint8Array(palette.length)
+  sortedPalette.forEach(({ idx }, pos) => { palettePositions[idx] = pos })
+
+  for (let sortedIdx = 0; sortedIdx < sortedPalette.length; sortedIdx++) {
+    const { c, idx, lum } = sortedPalette[sortedIdx]
+
     const maskRaw = Buffer.alloc(totalPixels * 3)
     for (let i = 0; i < totalPixels; i++) {
-      const v = pixelPaletteIdx[i] === idx ? 0 : 255  // black = this color
+      const assignedIdx = pixelPaletteIdx[i]
+      // Non-dark layers: include own pixels + pixels from any later layer.
+      // Those later-layer pixels will be painted over by subsequent layers,
+      // so filling them now makes each shape solid with no holes.
+      // Dark layers (outlines) only cover their own pixels — they're topmost.
+      const include = (lum < 50)
+        ? assignedIdx === idx
+        : (assignedIdx === idx || palettePositions[assignedIdx] > sortedIdx)
+      const v = include ? 0 : 255
       maskRaw[i * 3] = v; maskRaw[i * 3 + 1] = v; maskRaw[i * 3 + 2] = v
     }
 
-    const isDarkLayer = luminance(c[0], c[1], c[2]) < 50
+    const isDarkLayer = lum < 50
+    const isMediumDark = lum < 80
 
-    // Dark layers: erode instead of expand.
-    // blur(1)+threshold(70) keeps only the densest dark pixels — thin 1-2px fringe
-    // lines blurred from both sides average ~80-155 and don't survive; intentional
-    // thick outlines (5px+) have near-zero centers that do survive.
-    // Light layers: expand ~1px (existing behavior) so fills close any gaps.
-    let pipeline = isDarkLayer
-      ? sharp(maskRaw, { raw: { width, height, channels: 3 } }).blur(1.0).threshold(70)
-      : sharp(maskRaw, { raw: { width, height, channels: 3 } }).blur(1.0).threshold(185)
+    // Three mask treatments:
+    //   medium-dark (50–80 lum): aggressive erosion — blur(2)+threshold(50).
+    //     Thin 1–3px fringe rings disappear (blurred from both sides, average > 50).
+    //     Solid filled regions (mouth, eyes) have dense centers that survive.
+    //   dark (lum < 50, thick outlines): mild erosion — blur(1)+threshold(70).
+    //   light (lum ≥ 80): expand ~1px so fills close any gaps between layers.
+    let pipeline = isMediumDark && !isDarkLayer
+      ? sharp(maskRaw, { raw: { width, height, channels: 3 } }).blur(2.0).threshold(50)
+      : isDarkLayer
+        ? sharp(maskRaw, { raw: { width, height, channels: 3 } }).blur(1.0).threshold(70)
+        : sharp(maskRaw, { raw: { width, height, channels: 3 } }).blur(1.0).threshold(185)
 
-    if (!isDarkLayer && smoothing > 0) {
+    if (!isMediumDark && smoothing > 0) {
       const softSigma = Math.min(Math.max(smoothing * 0.25, 0.3), 1.5)
       pipeline = (pipeline as ReturnType<typeof sharp>)
         .blur(softSigma)
@@ -178,7 +206,8 @@ export async function convertImageToSvg(
     try {
       const hex = rgbToHex(c[0], c[1], c[2])
       const layerTurdSize = isDarkLayer ? Math.max(turdSize * 2, 4) : turdSize
-      const inner = await traceBuffer(maskPng, hex, layerTurdSize)
+      const raw   = await traceBuffer(maskPng, hex, layerTurdSize)
+      const inner = raw ? fitPrimitivesInSvg(raw, hex) : raw
       if (inner) {
         layers.push(inner)
         layerColors.push(hex)
