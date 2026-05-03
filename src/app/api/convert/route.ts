@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { convertImageToSvg } from '@/lib/converter'
 
-export const maxDuration = 60  // allow up to 60s for heavy images
+export const maxDuration = 60
 
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp'])
-const MAX_BYTES = 20 * 1024 * 1024  // 20 MB
+const MAX_BYTES = 20 * 1024 * 1024
 
 export async function POST(req: NextRequest) {
   try {
@@ -26,14 +26,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'File too large (max 20 MB)' }, { status: 413 })
     }
 
-    const svg = await convertImageToSvg(Buffer.from(arrayBuffer), { colors, turdSize, smoothing })
+    const result = await convertImageToSvg(Buffer.from(arrayBuffer), { colors, turdSize, smoothing })
 
-    return new NextResponse(svg, {
+    return NextResponse.json(result, {
       status: 200,
-      headers: {
-        'Content-Type': 'image/svg+xml',
-        'Cache-Control': 'no-store',
-      },
+      headers: { 'Cache-Control': 'no-store' },
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Conversion failed'

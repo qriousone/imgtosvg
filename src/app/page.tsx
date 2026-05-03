@@ -26,6 +26,10 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [svgResult, setSvgResult] = useState<string | null>(null)
+  const [palette, setPalette] = useState<string[]>([])
+  const [layerSvgs, setLayerSvgs] = useState<string[]>([])
+  const [selectedLayer, setSelectedLayer] = useState<number | null>(null)
+  const [stepsOpen, setStepsOpen] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [colors, setColors] = useState(16)
@@ -37,6 +41,10 @@ export default function Home() {
     setFile(f)
     setStage('ready')
     setSvgResult(null)
+    setPalette([])
+    setLayerSvgs([])
+    setSelectedLayer(null)
+    setStepsOpen(false)
     setErrorMsg(null)
     const url = URL.createObjectURL(f)
     setPreviewUrl(prev => {
@@ -77,8 +85,10 @@ export default function Home() {
         throw new Error(data.error ?? 'Conversion failed')
       }
 
-      const svg = await res.text()
-      setSvgResult(svg)
+      const data = await res.json()
+      setSvgResult(data.svg)
+      setPalette(data.palette ?? [])
+      setLayerSvgs(data.layers ?? [])
       setStage('done')
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Something went wrong')
@@ -101,6 +111,10 @@ export default function Home() {
     setStage('idle')
     setFile(null)
     setSvgResult(null)
+    setPalette([])
+    setLayerSvgs([])
+    setSelectedLayer(null)
+    setStepsOpen(false)
     setErrorMsg(null)
     setPreviewUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null })
     if (inputRef.current) inputRef.current.value = ''
@@ -297,6 +311,92 @@ export default function Home() {
             </div>
           </>
         )}
+
+        {/* ── Steps breakdown ──────────────────────────────────────────────── */}
+        {stage === 'done' && layerSvgs.length > 0 && (
+          <div className="rounded-2xl bg-[#1a1a24] border border-[#2a2a38] overflow-hidden">
+            <button
+              className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-[#22223a] transition-all"
+              onClick={() => { setStepsOpen(o => !o); setSelectedLayer(null) }}
+            >
+              <span className="text-xs font-semibold text-gray-400 uppercase tracking-widest">
+                How it was built — {layerSvgs.length} color layers
+              </span>
+              <span className="text-gray-500 text-sm">{stepsOpen ? '▲' : '▼'}</span>
+            </button>
+
+            {stepsOpen && (
+              <div className="p-5 border-t border-[#2a2a38]">
+
+                {/* Palette swatches */}
+                <p className="text-xs text-gray-500 mb-3">
+                  Step 1 — Color palette extracted (lightest → darkest, drawn in this order)
+                </p>
+                <div className="flex flex-wrap gap-2 mb-6">
+                  {palette.map((hex, i) => (
+                    <button
+                      key={i}
+                      title={hex}
+                      onClick={() => setSelectedLayer(selectedLayer === i ? null : i)}
+                      className={`relative w-8 h-8 rounded-lg overflow-hidden border-2 transition-all ${
+                        selectedLayer === i ? 'border-purple-400 scale-110' : 'border-[#3a3a50] hover:border-gray-400'
+                      }`}
+                    >
+                      <span className="absolute inset-0 checker" />
+                      <span className="absolute inset-0" style={{ backgroundColor: hex }} />
+                    </button>
+                  ))}
+                </div>
+
+                {/* Layer grid */}
+                <p className="text-xs text-gray-500 mb-3">
+                  Step 2 — Each color traced as its own stencil (click to inspect)
+                </p>
+                <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-2 mb-5">
+                  {layerSvgs.map((svg, i) => (
+                    <button
+                      key={i}
+                      onClick={() => setSelectedLayer(selectedLayer === i ? null : i)}
+                      className={`checker rounded-xl overflow-hidden aspect-square border-2 transition-all ${
+                        selectedLayer === i ? 'border-purple-400' : 'border-transparent hover:border-[#3a3a50]'
+                      }`}
+                    >
+                      <div dangerouslySetInnerHTML={{ __html: svg }} style={{ lineHeight: 0 }} />
+                    </button>
+                  ))}
+                </div>
+
+                {/* Selected layer full view */}
+                {selectedLayer !== null && (
+                  <div className="rounded-xl border border-purple-800 overflow-hidden">
+                    <div className="flex items-center gap-3 px-4 py-2 border-b border-purple-900">
+                      <div className="w-4 h-4 rounded" style={{ background: palette[selectedLayer] }} />
+                      <span className="text-xs text-purple-300 font-mono">{palette[selectedLayer]}</span>
+                      <span className="text-xs text-gray-500 ml-auto">Layer {selectedLayer + 1} of {layerSvgs.length}</span>
+                      <button
+                        onClick={() => setSelectedLayer(null)}
+                        className="text-gray-600 hover:text-white ml-2"
+                      >×</button>
+                    </div>
+                    <div className="checker p-6 flex items-center justify-center" style={{ minHeight: 200 }}>
+                      <div
+                        className="w-full max-h-64 overflow-hidden"
+                        dangerouslySetInnerHTML={{ __html: layerSvgs[selectedLayer] }}
+                        style={{ lineHeight: 0 }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Final stack note */}
+                <p className="text-xs text-gray-600 mt-4">
+                  Step 3 — All {layerSvgs.length} layers stacked = the final SVG
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
       </div>
 
       <footer className="mt-16 text-xs text-gray-600">

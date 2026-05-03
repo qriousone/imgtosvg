@@ -7,6 +7,15 @@ export interface ConversionOptions {
   turdSize?: number
   smoothing?: number
   maxSize?: number
+  debug?: boolean
+}
+
+export interface ConversionResult {
+  svg: string           // final assembled SVG
+  palette: string[]     // hex colors in draw order (lightest first)
+  layers: string[]      // individual single-color SVG per palette entry
+  width: number
+  height: number
 }
 
 type RGB = [number, number, number]
@@ -43,7 +52,8 @@ function luminance(r: number, g: number, b: number): number {
 }
 
 function rgbToHex(r: number, g: number, b: number): string {
-  return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')
+  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)))
+  return '#' + [r, g, b].map(v => clamp(v).toString(16).padStart(2, '0')).join('')
 }
 
 // ── Potrace wrapper ───────────────────────────────────────────────────────────
@@ -69,7 +79,7 @@ function traceBuffer(pngBuffer: Buffer, color: string, turdSize: number): Promis
 export async function convertImageToSvg(
   imageBuffer: Buffer,
   opts: ConversionOptions = {}
-): Promise<string> {
+): Promise<ConversionResult> {
   const { colors = 16, turdSize = 2, smoothing = 1, maxSize = 900 } = opts
 
   // ── 1. Preprocess ────────────────────────────────────────────────────────────
@@ -132,6 +142,11 @@ export async function convertImageToSvg(
 
   // ── 5. Per-color: mask → expand → smooth → trace ─────────────────────────────
   const layers: string[] = []
+  const layerColors: string[] = []
+  const layerSvgs: string[] = []
+
+  const svgWrap = (inner: string, hex: string) =>
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" style="display:block;width:100%;height:auto"><g>${inner.replace(/fill="[^"]*"/, `fill="${hex}"`)}</g></svg>`
 
   for (const { c, idx } of sortedPalette) {
     const maskRaw = Buffer.alloc(totalPixels * 3)
@@ -140,17 +155,18 @@ export async function convertImageToSvg(
       maskRaw[i * 3] = v; maskRaw[i * 3 + 1] = v; maskRaw[i * 3 + 2] = v
     }
 
-    // Stage A (fixed): expand each color region by ~1px to close gaps between
-    //   adjacent layers. blur(1)+threshold(185) pulls the gradient halo inward.
-    //   Never changes — independent of the smoothing slider.
-    // Stage B (optional): gentle softening of the mask edge shape.
-    //   Capped at blur sigma 1.5 so fine detail (eyes, tiny bubbles) is preserved
-    //   even at smoothing=5.
-    let pipeline = sharp(maskRaw, { raw: { width, height, channels: 3 } })
-      .blur(1.0)
-      .threshold(185)
+    const isDarkLayer = luminance(c[0], c[1], c[2]) < 50
 
-    if (smoothing > 0) {
+    // Dark layers: erode instead of expand.
+    // blur(1)+threshold(70) keeps only the densest dark pixels — thin 1-2px fringe
+    // lines blurred from both sides average ~80-155 and don't survive; intentional
+    // thick outlines (5px+) have near-zero centers that do survive.
+    // Light layers: expand ~1px (existing behavior) so fills close any gaps.
+    let pipeline = isDarkLayer
+      ? sharp(maskRaw, { raw: { width, height, channels: 3 } }).blur(1.0).threshold(70)
+      : sharp(maskRaw, { raw: { width, height, channels: 3 } }).blur(1.0).threshold(185)
+
+    if (!isDarkLayer && smoothing > 0) {
       const softSigma = Math.min(Math.max(smoothing * 0.25, 0.3), 1.5)
       pipeline = (pipeline as ReturnType<typeof sharp>)
         .blur(softSigma)
@@ -160,8 +176,14 @@ export async function convertImageToSvg(
     const maskPng = await (pipeline as ReturnType<typeof sharp>).png().toBuffer()
 
     try {
-      const inner = await traceBuffer(maskPng, rgbToHex(c[0], c[1], c[2]), turdSize)
-      if (inner) layers.push(inner)
+      const hex = rgbToHex(c[0], c[1], c[2])
+      const layerTurdSize = isDarkLayer ? Math.max(turdSize * 2, 4) : turdSize
+      const inner = await traceBuffer(maskPng, hex, layerTurdSize)
+      if (inner) {
+        layers.push(inner)
+        layerColors.push(hex)
+        layerSvgs.push(svgWrap(inner, hex))
+      }
     } catch { /* skip failed layers */ }
   }
 
@@ -169,11 +191,13 @@ export async function convertImageToSvg(
 
   // ── 6. Assemble SVG ──────────────────────────────────────────────────────────
   const body = layers.map(l => `  <g>${l}</g>`).join('\n')
-  return [
+  const svg = [
     `<svg xmlns="http://www.w3.org/2000/svg"`,
     `     viewBox="0 0 ${width} ${height}"`,
     `     style="display:block;width:100%;height:auto">`,
     body,
     `</svg>`,
   ].join('\n')
+
+  return { svg, palette: layerColors, layers: layerSvgs, width, height }
 }
