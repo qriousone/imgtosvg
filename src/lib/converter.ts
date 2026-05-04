@@ -129,23 +129,34 @@ export async function convertImageToSvg(
     pixelPaletteIdx[i] = nearest
   }
 
-  // ── 4. Count pixels per palette entry — used to detect fringe layers ────────
-  // Fringe colors (blended edge pixels) are dark AND cover very few pixels.
-  // Real fills and intentional outlines cover enough area to distinguish them.
-  const paletteCounts = new Int32Array(palette.length)
-  for (let i = 0; i < totalPixels; i++) paletteCounts[pixelPaletteIdx[i]]++
+  // ── 4. Bounding box per palette entry ───────────────────────────────────────
+  // Used as the sort key: a shadow ring around a circle has a slightly larger
+  // bounding box than the fill circle inside it, so it sorts first and gets
+  // drawn as a solid shape before the fill paints over its center.
+  const paletteBBox = Array.from({ length: palette.length }, () =>
+    ({ minX: width, maxX: 0, minY: height, maxY: 0 }))
+  for (let i = 0; i < totalPixels; i++) {
+    const j = pixelPaletteIdx[i]
+    const px = i % width, py = Math.floor(i / width)
+    const bb = paletteBBox[j]
+    if (px < bb.minX) bb.minX = px
+    if (px > bb.maxX) bb.maxX = px
+    if (py < bb.minY) bb.minY = py
+    if (py > bb.maxY) bb.maxY = py
+  }
+  const paletteBBoxArea = paletteBBox.map(bb =>
+    Math.max(0, bb.maxX - bb.minX) * Math.max(0, bb.maxY - bb.minY))
 
-  // ── 5. Sort layers: largest area first (painter's algorithm), dark last ────────
-  // Sort non-dark layers by pixel count descending: biggest shapes paint first,
-  // smaller shapes (highlights, bubbles) paint on top naturally — no cutouts needed.
-  // Dark outlines (lum < 50) always go last regardless of area.
+  // ── 5. Sort layers: largest bounding box first, dark outlines last ───────────
+  // Bounding box area correctly orders shadow rings before their inner fills:
+  // the ring's bbox spans outer_radius while the fill's bbox spans inner_radius.
   const sortedPalette = palette
     .map((c, idx) => ({ c, idx, lum: luminance(c[0], c[1], c[2]) }))
     .sort((a, b) => {
       const aDark = a.lum < 50
       const bDark = b.lum < 50
-      if (aDark !== bDark) return aDark ? 1 : -1              // dark always last
-      return paletteCounts[b.idx] - paletteCounts[a.idx]      // largest area first
+      if (aDark !== bDark) return aDark ? 1 : -1                // dark always last
+      return paletteBBoxArea[b.idx] - paletteBBoxArea[a.idx]    // largest bbox first
     })
 
   // ── 6. Per-color: mask → expand/erode → smooth → trace ──────────────────────

@@ -166,6 +166,16 @@ export function fitPrimitivesInSvg(inner: string, fill: string): string {
       circles.push(`<circle cx="${F(c.x)}" cy="${F(c.y)}" r="${F(r)}" fill="${fill}"/>`)
     }
 
-    return circles.join('\n')
+    // Single circle: straightforward replacement
+    if (circles.length === 1) return circles[0]
+
+    // Donut / ring shape: multiple circular subpaths in one path.
+    // Keep only the OUTER (largest) circle — the next layer drawn on top
+    // will cover its interior, producing the ring appearance without a cutout.
+    return circles.reduce((best, curr) => {
+      const rBest = parseFloat(best.match(/r="([\d.]+)"/)?.[1] ?? '0')
+      const rCurr = parseFloat(curr.match(/r="([\d.]+)"/)?.[1] ?? '0')
+      return rCurr > rBest ? curr : best
+    })
   })
 }
