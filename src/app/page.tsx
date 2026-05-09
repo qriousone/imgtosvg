@@ -32,9 +32,6 @@ export default function Home() {
   const [stepsOpen, setStepsOpen] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
-  const [colors, setColors] = useState(16)
-  const [turdSize, setTurdSize] = useState(2)
-  const [smoothing, setSmoothing] = useState(1)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const acceptFile = useCallback((f: File) => {
@@ -74,9 +71,6 @@ export default function Home() {
     try {
       const form = new FormData()
       form.append('image', file)
-      form.append('colors', String(colors))
-      form.append('turdSize', String(turdSize))
-      form.append('smoothing', String(smoothing))
 
       const res = await fetch('/api/convert', { method: 'POST', body: form })
 
@@ -94,7 +88,7 @@ export default function Home() {
       setErrorMsg(err instanceof Error ? err.message : 'Something went wrong')
       setStage('error')
     }
-  }, [file, colors, turdSize])
+  }, [file])
 
   const downloadSvg = useCallback(() => {
     if (!svgResult) return
@@ -131,7 +125,7 @@ export default function Home() {
           img → svg
         </h1>
         <p className="mt-2 text-sm text-gray-400 max-w-md">
-          Color-accurate vector conversion. Each hue becomes its own traced layer, stacked in depth order.
+          Drop an image. Get a clean SVG — shapes detected, gradients fitted, all auto-tuned.
         </p>
       </div>
 
@@ -176,39 +170,6 @@ export default function Home() {
                 </svg>
                 {file?.name ?? 'image'}
               </button>
-
-              {/* Colors */}
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#1a1a24] border border-[#2a2a38]">
-                <span className="text-xs text-gray-400">Colors</span>
-                <span className="text-xs text-purple-400 font-mono w-7 text-right">{colors}</span>
-                <input
-                  type="range" min={4} max={100} step={1} value={colors}
-                  onChange={e => setColors(Number(e.target.value))}
-                  className="w-24 accent-purple-500"
-                />
-              </div>
-
-              {/* Smoothing */}
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#1a1a24] border border-[#2a2a38]">
-                <span className="text-xs text-gray-400">Smooth</span>
-                <span className="text-xs text-purple-400 font-mono w-5 text-right">{smoothing}</span>
-                <input
-                  type="range" min={0} max={5} step={0.5} value={smoothing}
-                  onChange={e => setSmoothing(Number(e.target.value))}
-                  className="w-20 accent-purple-500"
-                />
-              </div>
-
-              {/* Noise removal */}
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#1a1a24] border border-[#2a2a38]">
-                <span className="text-xs text-gray-400">Noise</span>
-                <span className="text-xs text-purple-400 font-mono w-3 text-right">{turdSize}</span>
-                <input
-                  type="range" min={0} max={10} step={1} value={turdSize}
-                  onChange={e => setTurdSize(Number(e.target.value))}
-                  className="w-20 accent-purple-500"
-                />
-              </div>
 
               {/* Spacer */}
               <div className="flex-1" />
@@ -320,7 +281,7 @@ export default function Home() {
               onClick={() => { setStepsOpen(o => !o); setSelectedLayer(null) }}
             >
               <span className="text-xs font-semibold text-gray-400 uppercase tracking-widest">
-                How it was built — {layerSvgs.length} color layers
+                How it was built — {layerSvgs.length} shapes
               </span>
               <span className="text-gray-500 text-sm">{stepsOpen ? '▲' : '▼'}</span>
             </button>
@@ -330,7 +291,7 @@ export default function Home() {
 
                 {/* Palette swatches */}
                 <p className="text-xs text-gray-500 mb-3">
-                  Step 1 — Color palette extracted (lightest → darkest, drawn in this order)
+                  Step 1 — Shapes detected, sorted by size (largest drawn first)
                 </p>
                 <div className="flex flex-wrap gap-2 mb-6">
                   {palette.map((hex, i) => (
@@ -350,7 +311,7 @@ export default function Home() {
 
                 {/* Layer grid */}
                 <p className="text-xs text-gray-500 mb-3">
-                  Step 2 — Each color traced as its own stencil (click to inspect)
+                  Step 2 — Each shape traced and filled (solid or gradient — click to inspect)
                 </p>
                 <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-2 mb-5">
                   {layerSvgs.map((svg, i) => (
@@ -390,7 +351,7 @@ export default function Home() {
 
                 {/* Final stack note */}
                 <p className="text-xs text-gray-600 mt-4">
-                  Step 3 — All {layerSvgs.length} layers stacked = the final SVG
+                  Step 3 — All {layerSvgs.length} shapes stacked = the final SVG
                 </p>
               </div>
             )}
@@ -400,7 +361,7 @@ export default function Home() {
       </div>
 
       <footer className="mt-16 text-xs text-gray-600">
-        Vectors powered by Potrace · Color quantization via median-cut
+        Connected-component shape decomposition · Lab clan clustering · Potrace
       </footer>
     </main>
   )

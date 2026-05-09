@@ -17,3 +17,4 @@ npm-debug.log*
 # test artifacts
 pizza.png
 pizza_out.svg
+tmp/

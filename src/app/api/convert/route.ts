@@ -10,9 +10,6 @@ export async function POST(req: NextRequest) {
   try {
     const form = await req.formData()
     const file = form.get('image')
-    const colors = parseInt((form.get('colors') as string) || '16', 10)
-    const turdSize = parseInt((form.get('turdSize') as string) || '2', 10)
-    const smoothing = parseFloat((form.get('smoothing') as string) || '1')
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: 'No image uploaded' }, { status: 400 })
@@ -26,7 +23,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'File too large (max 20 MB)' }, { status: 413 })
     }
 
-    const result = await convertImageToSvg(Buffer.from(arrayBuffer), { colors, turdSize, smoothing })
+    const result = await convertImageToSvg(Buffer.from(arrayBuffer))
 
     return NextResponse.json(result, {
       status: 200,
