@@ -148,6 +148,7 @@ interface Component {
   id: number
   clanId: number
   area: number
+  perimeter: number  // count of border edges (pixel-edge units, 4-conn)
   bbox: { minX: number; maxX: number; minY: number; maxY: number }
   edgeTouch: number  // how many image edges this component touches (0–4)
   firstPixel: number  // seed pixel index — used to look up palette/clan ids
@@ -172,6 +173,7 @@ function extractComponents(
     const compId = components.length
 
     let area = 0
+    let perimeter = 0
     let minX = i % width, maxX = minX
     let minY = (i / width) | 0, maxY = minY
     let edgeMask = 0
@@ -188,16 +190,17 @@ function extractComponents(
       if (px > maxX) maxX = px
       if (py < minY) minY = py
       if (py > maxY) maxY = py
-      if (px === 0)          edgeMask |= 1
-      if (px === width - 1)  edgeMask |= 2
-      if (py === 0)          edgeMask |= 4
-      if (py === height - 1) edgeMask |= 8
+      if (px === 0)          { edgeMask |= 1; perimeter++ }
+      if (px === width - 1)  { edgeMask |= 2; perimeter++ }
+      if (py === 0)          { edgeMask |= 4; perimeter++ }
+      if (py === height - 1) { edgeMask |= 8; perimeter++ }
 
-      // 4-connected neighbours
-      if (px > 0)          { const n = p - 1;     if (labels[n] === -1 && pixelClanIdx[n] === clanId) { labels[n] = compId; stack.push(n) } }
-      if (px < width - 1)  { const n = p + 1;     if (labels[n] === -1 && pixelClanIdx[n] === clanId) { labels[n] = compId; stack.push(n) } }
-      if (py > 0)          { const n = p - width; if (labels[n] === -1 && pixelClanIdx[n] === clanId) { labels[n] = compId; stack.push(n) } }
-      if (py < height - 1) { const n = p + width; if (labels[n] === -1 && pixelClanIdx[n] === clanId) { labels[n] = compId; stack.push(n) } }
+      // 4-connected neighbours: same-clan neighbours grow the component;
+      // different-clan neighbours contribute one edge to the perimeter.
+      if (px > 0)          { const n = p - 1;     if (pixelClanIdx[n] === clanId) { if (labels[n] === -1) { labels[n] = compId; stack.push(n) } } else perimeter++ }
+      if (px < width - 1)  { const n = p + 1;     if (pixelClanIdx[n] === clanId) { if (labels[n] === -1) { labels[n] = compId; stack.push(n) } } else perimeter++ }
+      if (py > 0)          { const n = p - width; if (pixelClanIdx[n] === clanId) { if (labels[n] === -1) { labels[n] = compId; stack.push(n) } } else perimeter++ }
+      if (py < height - 1) { const n = p + width; if (pixelClanIdx[n] === clanId) { if (labels[n] === -1) { labels[n] = compId; stack.push(n) } } else perimeter++ }
     }
 
     let edgeTouch = 0
@@ -210,6 +213,7 @@ function extractComponents(
       id: compId,
       clanId,
       area,
+      perimeter,
       bbox: { minX, maxX, minY, maxY },
       edgeTouch,
       firstPixel: i,
@@ -547,7 +551,33 @@ export async function convertImageToSvg(
     })
   }
 
-  // Add details (palette-CCs whose color != parent master's dominant)
+  // Add details (palette-CCs whose color != parent master's dominant).
+  // Reject "fringe rings" — thin strips of in-between color produced by
+  // anti-aliasing along boundaries of two distinct regions. They quantize
+  // to a muddy intermediate shade and trace as wavy 1-2px-wide rings that
+  // look like artifacts. Detection: thickness = area / perimeter; a 2px-
+  // wide ring has thickness ~1, a 3px line ~1.5, a real solid feature ≥2.
+  // We also require the candidate's Lab to be perceptually "between" the
+  // parent's dominant color and a near-white-or-near-black anchor, since
+  // legitimate thin features (mouth strokes, eye outlines) tend to be
+  // either far from the parent in chroma or distinctly dark/light, while
+  // fringes are a desaturated midpoint.
+  const FRINGE_THICKNESS = 1.5
+
+  const isFringeRing = (pc: Component, parentDomPal: number, ownPal: number): boolean => {
+    const thickness = pc.area / Math.max(1, pc.perimeter)
+    if (thickness >= FRINGE_THICKNESS) return false
+    // Keep tiny but non-stringy details (e.g. a 4×4 dot has thickness ~1
+    // but isn't a ring). Only filter when both thin AND elongated.
+    const compactness = (4 * Math.PI * pc.area) / (pc.perimeter * pc.perimeter)
+    if (compactness >= 0.4) return false
+    // Final sanity: small fringes only — never strip a major shape.
+    if (pc.area > MIN_AREA * 6) return false
+    // It's thin, elongated, small → almost certainly an anti-alias artifact.
+    void parentDomPal; void ownPal
+    return true
+  }
+
   for (const pc of pComponents) {
     const parentMasterId = labels[pc.firstPixel]
     if (!masterCompIdSet.has(parentMasterId)) continue  // parent was filtered (bg etc.)
@@ -557,6 +587,7 @@ export async function convertImageToSvg(
     const pcPalIdx  = pixelPaletteIdx[pc.firstPixel]
     if (pcPalIdx === parentDom) continue  // master already paints this color
     if (!passesAreaFilter(pc.area, pcPalIdx)) continue
+    if (isFringeRing(pc, parentDom, pcPalIdx)) continue
 
     renderables.push({
       kind: 'detail',
@@ -617,12 +648,19 @@ export async function convertImageToSvg(
       maskRaw[i * 3] = v; maskRaw[i * 3 + 1] = v; maskRaw[i * 3 + 2] = v
     }
 
-    // Mild morphology:
-    //   dark  → blur(0.5)+threshold(110) — gentle erode, preserves thin lines
+    // Morphology:
+    //   dark  → opening (erode then dilate) with ~2px kernel. Removes thin
+    //           anti-aliased "wing" protrusions extending from solid dark
+    //           shapes (e.g. eyes growing eyelash-like spurs into adjacent
+    //           cheese fringe), while keeping 3-px+ features (outlines, the
+    //           crust/cheese separator) intact.
     //   light → blur(1.0)+threshold(185) — ~1px expansion to close layer gaps
     let pipeline = isDarkLayer
-      ? sharp(maskRaw, { raw: { width, height, channels: 3 } }).blur(0.5).threshold(110)
-      : sharp(maskRaw, { raw: { width, height, channels: 3 } }).blur(1.0).threshold(185)
+      ? sharp(maskRaw, { raw: { width, height, channels: 3 } })
+          .blur(1.0).threshold(80)        // erode (kernel ~2px)
+          .blur(1.0).threshold(195)       // dilate back
+      : sharp(maskRaw, { raw: { width, height, channels: 3 } })
+          .blur(1.0).threshold(185)
 
     pipeline = (pipeline as ReturnType<typeof sharp>)
       .blur(SMOOTH_SIGMA)
