@@ -491,7 +491,10 @@ export async function convertImageToSvg(
 ): Promise<ConversionResult> {
   const { maxSize = 900 } = opts  // sweet spot — bigger reveals anti-alias noise as fringe shapes
 
-  // 1. Preprocess — resize, flatten transparency to white, smooth tiny noise
+  // 1. Preprocess — resize, flatten transparency to white, smooth tiny noise.
+  // median(5) absorbs typical 1-2 px anti-alias fringes; the bbox-restricted
+  // silhouette + colour-aware fringe filter handle the rest without rounding
+  // off legitimate corners (median(7) was killing pepperoni curvature too).
   const preprocessed = await sharp(imageBuffer)
     .resize(maxSize, maxSize, { fit: 'inside', withoutEnlargement: true })
     .flatten({ background: { r: 255, g: 255, b: 255 } })
@@ -594,10 +597,29 @@ export async function convertImageToSvg(
     return area >= (isBright ? MIN_AREA_BRIGHT : MIN_AREA)
   }
 
-  // Filter master clan-CCs: drop bg, drop tiny
+  // Filter master clan-CCs: drop bg, drop tiny, drop fringe-halo masters.
+  // A fringe-halo is a thin, elongated, intermediate-coloured (lum 40–200)
+  // ring that sits at the boundary of two distinct colour regions. Real
+  // outlines are very dark (lum < 40); real shape blobs are compact.
+  const isFringeMaster = (m: Component): boolean => {
+    const dom = dominantPaletteOf(m)
+    if (dom < 0) return false
+    const [r, g, b] = palette[dom]
+    const lum = luminance(r, g, b)
+    if (lum < 40 || lum > 200) return false
+    const thickness   = m.area / Math.max(1, m.perimeter)
+    const compactness = (4 * Math.PI * m.area) / (m.perimeter * m.perimeter)
+    if (thickness >= 2.5) return false
+    if (compactness >= 0.5) return false
+    if (m.area > totalPixels * 0.015) return false
+    return true
+  }
+
   const validMasters = components.filter(c => {
     if (isBackgroundComponent(c, palette)) return false
-    return passesAreaFilter(c.area, dominantPaletteOf(c))
+    if (!passesAreaFilter(c.area, dominantPaletteOf(c))) return false
+    if (isFringeMaster(c)) return false
+    return true
   })
 
   // 10. Build the renderable list — master shapes plus detail shapes.
@@ -641,19 +663,17 @@ export async function convertImageToSvg(
   // legitimate thin features (mouth strokes, eye outlines) tend to be
   // either far from the parent in chroma or distinctly dark/light, while
   // fringes are a desaturated midpoint.
-  const FRINGE_THICKNESS = 1.5
-
-  const isFringeRing = (pc: Component, parentDomPal: number, ownPal: number): boolean => {
-    const thickness = pc.area / Math.max(1, pc.perimeter)
-    if (thickness >= FRINGE_THICKNESS) return false
-    // Keep tiny but non-stringy details (e.g. a 4×4 dot has thickness ~1
-    // but isn't a ring). Only filter when both thin AND elongated.
+  // Drop a detail palette-CC when it's a thin, elongated, intermediate-colour
+  // arc (anti-alias remnant) that would render as a "squiggle line".
+  const isFringeDetail = (pc: Component, ownPal: number): boolean => {
+    const [r, g, b] = palette[ownPal]
+    const lum = luminance(r, g, b)
+    if (lum < 40 || lum > 200) return false
+    const thickness   = pc.area / Math.max(1, pc.perimeter)
     const compactness = (4 * Math.PI * pc.area) / (pc.perimeter * pc.perimeter)
-    if (compactness >= 0.4) return false
-    // Final sanity: small fringes only — never strip a major shape.
-    if (pc.area > MIN_AREA * 6) return false
-    // It's thin, elongated, small → almost certainly an anti-alias artifact.
-    void parentDomPal; void ownPal
+    if (thickness >= 2.5) return false
+    if (compactness >= 0.5) return false
+    if (pc.area > totalPixels * 0.015) return false
     return true
   }
 
@@ -666,7 +686,7 @@ export async function convertImageToSvg(
     const pcPalIdx  = pixelPaletteIdx[pc.firstPixel]
     if (pcPalIdx === parentDom) continue  // master already paints this color
     if (!passesAreaFilter(pc.area, pcPalIdx)) continue
-    if (isFringeRing(pc, parentDom, pcPalIdx)) continue
+    if (isFringeDetail(pc, pcPalIdx)) continue
 
     renderables.push({
       kind: 'detail',
@@ -820,12 +840,28 @@ export async function convertImageToSvg(
     const isDarkLayer = lum < 80
     const strokeSpec = r.kind === 'master' ? strokeOnMaster.get(r.comp.id) : undefined
 
+    // Painter's algorithm with bbox-restricted silhouette:
+    //   non-dark layers fill internal holes ONLY for smaller layers spatially
+    //   inside this layer's own bbox. Without the bbox restriction, the
+    //   pepperoni silhouette extends across the whole image (including the
+    //   eye/mouth/blush areas), and when those features shrink ≥1 px during
+    //   morphology, pepperoni-pink leaks through as a visible halo "outline".
+    const bb = r.kind === 'master' ? r.comp.bbox : r.pcomp.bbox
+    const bbMinX = bb.minX, bbMaxX = bb.maxX, bbMinY = bb.minY, bbMaxY = bb.maxY
     const maskRaw = Buffer.alloc(totalPixels * 3)
     for (let i = 0; i < totalPixels; i++) {
       const order = pixelRenderOrder[i]
-      const include = isDarkLayer
-        ? order === pos
-        : order !== -1 && order >= pos
+      let include: boolean
+      if (isDarkLayer) {
+        include = order === pos
+      } else if (order === pos) {
+        include = true
+      } else if (order > pos) {
+        const x = i % width, y = (i / width) | 0
+        include = x >= bbMinX && x <= bbMaxX && y >= bbMinY && y <= bbMaxY
+      } else {
+        include = false
+      }
       const v = include ? 0 : 255
       maskRaw[i * 3] = v; maskRaw[i * 3 + 1] = v; maskRaw[i * 3 + 2] = v
     }
